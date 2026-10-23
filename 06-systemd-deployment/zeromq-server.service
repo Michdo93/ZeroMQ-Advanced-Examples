@@ -1,0 +1,25 @@
+[Unit]
+Description=ZeroMQ Example Server
+Documentation=https://zeromq.org/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zmqservice
+Group=zmqservice
+WorkingDirectory=/opt/zeromq-server
+EnvironmentFile=-/etc/zeromq-server/zeromq-server.env
+ExecStart=/opt/zeromq-server/venv/bin/python /opt/zeromq-server/server.py
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/zeromq-server
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
