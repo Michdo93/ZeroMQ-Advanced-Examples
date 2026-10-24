@@ -1,96 +1,218 @@
 # ZeroMQ Advanced Examples
 
-Progressive PyZMQ examples for tokens, ZAP IP policies, CURVE security, and Ubuntu systemd. Python 3.10+; Ubuntu/Debian commands below. These are educational examples and do not replace production security review.
+Step-by-step security and deployment examples for **ZeroMQ in Python (pyzmq)** – from a simple application token up to a hardened, CURVE-encrypted **systemd** service on Ubuntu, plus a small **ZeroMQ vs. MQTT** benchmark.
 
-## Install
+Companion repository of the book *From Zero to Hero – ZeroMQ in Python meistern*.
+
+| Step | Folder | Topic | Encrypted? |
+|-----:|--------|-------|:----------:|
+| 1 | [`01-password-token`](01-password-token) | Shared token inside the JSON payload (application level) | no |
+| 2 | [`02-blacklist`](02-blacklist) | ZAP: PLAIN username/password + IP **blacklist** | no |
+| 3 | [`03-whitelist`](03-whitelist) | ZAP: PLAIN username/password + IP **whitelist** | no |
+| 4 | [`04-black-whitelist`](04-black-whitelist) | Own ZAP handler: CIDR whitelist **and** blacklist + PLAIN | no |
+| 5 | [`05-curve-certificates`](05-curve-certificates) | CURVE certificates, key distribution, client whitelist | **yes** |
+| 6 | [`06-systemd-deployment`](06-systemd-deployment) | Production service: CURVE + SIGTERM + journald + systemd hardening | **yes** |
+| 7 | [`07-mqtt-comparison`](07-mqtt-comparison) | Latency/throughput/CPU/RAM: ZeroMQ vs. MQTT (mosquitto) | – |
+
+---
+
+## Installation
+
+Tested with Python 3.12/3.13, pyzmq 27, libzmq 4.3.5 on Ubuntu.
 
 ```bash
-sudo apt update && sudo apt install -y python3 python3-venv
-python3 -m venv .venv && source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+sudo apt update
+sudo apt install -y python3 python3-venv
+git clone https://github.com/Michdo93/ZeroMQ-Advanced-Examples.git
+cd ZeroMQ-Advanced-Examples
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-Keep the environment active in each terminal. Windows PowerShell: `.venv\Scripts\Activate.ps1`.
+Check that your libzmq supports CURVE (the pyzmq wheels always do):
 
-## 1. Application token
+```bash
+python -c "import zmq; print(zmq.zmq_version(), 'CURVE:', zmq.has('curve'))"
+```
 
-Terminal A: `export ZMQ_DEMO_TOKEN='my-local-token'; python 01-password-token/server.py`
-Terminal B: `export ZMQ_DEMO_TOKEN='my-local-token'; python 01-password-token/client.py`
+All examples are configured through **environment variables**, never by editing secrets into source code. Run every command from the repository root, server and client in separate terminals.
 
-Use separate terminals, both from repo root with venv activated. Default endpoint `tcp://127.0.0.1:5555`; customize both peers with the same `ZMQ_ENDPOINT`. Set `ZMQ_DEMO_TOKEN` on both peers to change the token, or use different values to see rejection. The token is sent in plaintext as message data; it is not a secure password transport.
+> **Testing IP rules on one machine:** ZeroMQ can force the *source* address of a TCP connection: `tcp://127.0.0.2:0;127.0.0.1:5555` means "connect from 127.0.0.2 to 127.0.0.1:5555". All of `127.0.0.0/8` is loopback on Linux, so you can simulate several "hosts" locally.
 
-## 2–4. PLAIN credentials and IP rules
+---
 
-Start the chosen server in Terminal A and its matching client in Terminal B. Example blacklist:
+## Step 1 – Application token
 
 ```bash
 # Terminal A
-export ZMQ_USER=demo ZMQ_PASSWORD=change-me ZMQ_DENY_IP=192.0.2.10
+export ZMQ_DEMO_TOKEN='my-local-token'
+python 01-password-token/server.py
+# Terminal B
+export ZMQ_DEMO_TOKEN='my-local-token'
+python 01-password-token/client.py      # -> {'ok': True, ...}
+ZMQ_DEMO_TOKEN=wrong python 01-password-token/client.py   # -> unauthorized
+```
+
+The token is compared with `hmac.compare_digest` (constant time). It is still sent in **plaintext** – this step only illustrates the idea.
+
+## Step 2 – PLAIN + IP blacklist (ZAP)
+
+```bash
+# Terminal A
+export ZMQ_USER=demo ZMQ_PASSWORD=change-me ZMQ_DENY_IP=127.0.0.2
 python 02-blacklist/server.py
 # Terminal B
-export ZMQ_USER=demo ZMQ_PASSWORD=change-me
-python 02-blacklist/client.py
+python 02-blacklist/client.py                                        # accepted
+ZMQ_ENDPOINT='tcp://127.0.0.2:0;127.0.0.1:5555' python 02-blacklist/client.py   # blacklisted
+ZMQ_PASSWORD=wrong python 02-blacklist/client.py                     # wrong password
 ```
 
-For whitelist use `03-whitelist/server.py` and `ZMQ_ALLOW_IP=127.0.0.1`. For combined rules use `04-black-whitelist/server.py` with both `ZMQ_ALLOW_IP` and `ZMQ_DENY_IP`. Clients read `ZMQ_USER` and `ZMQ_PASSWORD`; change these in both terminals to customize credentials. Defaults are demo/change-me. All use port 5555; set the same `ZMQ_ENDPOINT` in both peers and a free port if another example runs. ZAP rules filter the peer IP as seen by the host; NAT, containers, and proxies affect it. PLAIN and IP rules do not encrypt traffic; use firewall policy and CURVE for remote deployment.
+`ThreadAuthenticator` runs a ZAP handler thread. **The ZAP domain configured with `configure_plain(domain=...)` must match `socket.zap_domain`** (`"*"` is only used for sockets without a domain).
 
-## 5. CURVE keys, distribution, and run
+Set `ZMQ_LOG_LEVEL=DEBUG` to see every ZAP decision. Warning: pyzmq then also logs PLAIN passwords in clear text.
 
-Generate keys:
+## Step 3 – PLAIN + IP whitelist
 
 ```bash
-python 05-curve-certificates/generate_keys.py --output ./certs --client alice
+export ZMQ_ALLOW_IP=127.0.0.1
+python 03-whitelist/server.py
+# other terminal
+python 03-whitelist/client.py                                         # accepted
+ZMQ_ENDPOINT='tcp://127.0.0.3:0;127.0.0.1:5555' python 03-whitelist/client.py    # rejected
 ```
 
-`server.key` and `alice.key` are public; files ending `_secret` are private. Alice's public key is copied under `certs/authorized_clients/`. Never commit or transmit secret keys. For another host, securely transfer the server public key to the client, Alice public key to server authorization directory, and Alice secret key only to Alice's client host. Never transfer server secret to clients. Verify public-key fingerprints out of band and restrict file permissions.
+As soon as one address is allowed, **all others are rejected**.
 
-Server terminal:
+## Step 4 – Whitelist *and* blacklist (own ZAP handler)
+
+pyzmq's authenticator raises `ValueError` if `allow()` and `deny()` are combined and only matches exact IP strings. Step 4 implements the ZAP protocol directly (REP socket on `inproc://zeromq.zap.01`) and supports CIDR networks:
 
 ```bash
-export ZMQ_SERVER_PUBLIC=./certs/server.key ZMQ_SERVER_SECRET=./certs/server.key_secret
-export ZMQ_AUTHORIZED_DIR=./certs/authorized_clients ZMQ_ENDPOINT='tcp://*:5555'
+export ZMQ_ALLOW_NET=127.0.0.0/8,192.168.1.0/24 ZMQ_DENY_NET=127.0.0.2/32,192.168.1.50/32
+python 04-black-whitelist/server.py
+# other terminal
+python 04-black-whitelist/client.py
+ZMQ_ENDPOINT='tcp://127.0.0.2:0;127.0.0.1:5555' python 04-black-whitelist/client.py
+```
+
+The server log shows every decision, e.g. `127.0.0.2 PLAIN -> 400 IP is blacklisted`. The authenticated user name is read from the message metadata (`frame.get("User-Id")`).
+
+**PLAIN and IP rules do not encrypt anything.** For untrusted networks continue with step 5.
+
+## Step 5 – CURVE certificates
+
+### 5.1 Generate certificates
+
+```bash
+python 05-curve-certificates/generate_keys.py                    # server + client "alice"
+python 05-curve-certificates/generate_keys.py --client bob --no-server
+```
+
+```
+certs/
+├── server/server.key, server.key_secret      # stays on the server
+├── clients/alice.key, alice.key_secret       # alice.* go to Alice's machine
+└── authorized_clients/alice.key              # server-side whitelist (public keys only)
+```
+
+`*.key` = public certificate, `*.key_secret` = secret certificate (mode 0600). Files use the standard ZeroMQ certificate format (`zmq.auth.create_certificates` / `zmq.auth.load_certificate`).
+
+### 5.2 Run locally
+
+```bash
 python 05-curve-certificates/server.py
-```
-
-Client terminal (adjust file paths and server IP):
-
-```bash
-export ZMQ_CLIENT_PUBLIC=./certs/alice.key ZMQ_CLIENT_SECRET=./certs/alice.key_secret
-export ZMQ_SERVER_PUBLIC=./certs/server.key ZMQ_ENDPOINT='tcp://SERVER_IP:5555'
 python 05-curve-certificates/client.py
 ```
 
-For local use set client endpoint to `tcp://127.0.0.1:5555`. Add a client by generating a named pair and placing only its public key under server authorization directory. Configure that client's public/secret paths and the server public path. For rotation replace keys securely and restart as needed. CURVE encrypts the transport and authenticates keys; protect and rotate secrets.
+### 5.3 Distribute to a second system
 
-## 6. systemd service on Ubuntu
+| File | Server host | Client host (Alice) |
+|------|:-----------:|:-------------------:|
+| `server/server.key_secret` | ✅ | ❌ never |
+| `server/server.key` | ✅ | ✅ |
+| `clients/alice.key_secret` | ❌ (delete after copying) | ✅ |
+| `clients/alice.key` | ✅ in `authorized_clients/` | ✅ |
 
-The unit expects `/opt/zeromq-server/server.py`, virtualenv `/opt/zeromq-server/venv`, and user `zmqservice`. Review the unit and adapt paths before use.
-
-```bash
-sudo apt install -y python3 python3-venv
-sudo useradd --system --home /var/lib/zeromq-server --shell /usr/sbin/nologin zmqservice
-sudo install -d -o root -g zmqservice -m 0750 /opt/zeromq-server /etc/zeromq-server
-sudo python3 -m venv /opt/zeromq-server/venv
-sudo /opt/zeromq-server/venv/bin/pip install pyzmq
-sudo install -o root -g zmqservice -m 0640 06-systemd-deployment/server.py /opt/zeromq-server/server.py
-sudo install -m 0644 06-systemd-deployment/zeromq-server.service /etc/systemd/system/zeromq-server.service
-```
-
-Optional environment file and start:
+Ideally create Alice's key pair **on Alice's machine** and only transfer her public key:
 
 ```bash
-sudo sh -c 'printf "%s\n" "ZMQ_ENDPOINT=tcp://127.0.0.1:5555" > /etc/zeromq-server/zeromq-server.env'
-sudo chown root:zmqservice /etc/zeromq-server/zeromq-server.env
-sudo chmod 0640 /etc/zeromq-server/zeromq-server.env
-sudo systemctl daemon-reload
-sudo systemctl enable --now zeromq-server
-sudo systemctl status zeromq-server
-sudo journalctl -u zeromq-server -f
+# on the client host
+python 05-curve-certificates/generate_keys.py --client alice --no-server
+scp certs/clients/alice.key admin@server:/path/to/certs/authorized_clients/
+scp admin@server:/path/to/certs/server/server.key certs/server/
+# compare fingerprints out of band, e.g.
+sha256sum certs/server/server.key
 ```
 
-Edit environment file then `sudo systemctl restart zeromq-server`; stop/disable with `systemctl stop zeromq-server` / `systemctl disable zeromq-server`. The supplied systemd script is a basic REP example, not the CURVE server. To deploy CURVE, install CURVE server code, provision secret keys with service-account-only read permissions, and configure paths.
+Client on the other host:
 
-## Testing and troubleshooting
+```bash
+export ZMQ_ENDPOINT=tcp://SERVER_IP:5555
+export ZMQ_CLIENT_SECRET=certs/clients/alice.key_secret
+export ZMQ_SERVER_PUBLIC=certs/server/server.key
+python 05-curve-certificates/client.py
+```
 
-For every paired example, start server first and run its named client; success prints JSON. `Address already in use`: stop another server or choose a matching new endpoint. Timeout: check server, port, firewall, endpoint. CURVE authorization errors: check client's public key in authorized directory and matching paths. Customize request JSON in client and keep server handling aligned. Never place production passwords/private keys in source or public archives.
+Revoking a client = deleting its file from `authorized_clients/` and restarting the server (pyzmq loads the directory once at startup). Combine with `ZMQ_ALLOW_IP` for an additional IP whitelist. Open the port in the firewall only for known networks, e.g. `sudo ufw allow from 192.168.1.0/24 to any port 5555 proto tcp`.
+
+## Step 6 – systemd service on Ubuntu
+
+```bash
+sudo bash 06-systemd-deployment/install.sh
+```
+
+The script creates the system user `zmqservice`, installs the code + venv to `/opt/zeromq-server`, the configuration to `/etc/zeromq-server/zeromq-server.env`, generates the server certificate in `/etc/zeromq-server/certs/` and enables `zeromq-server.service`.
+
+```bash
+# authorize a client
+sudo cp alice.key /etc/zeromq-server/certs/authorized_clients/
+sudo systemctl restart zeromq-server
+# operate
+systemctl status zeromq-server
+journalctl -u zeromq-server -f
+sudo systemctl restart zeromq-server    # SIGTERM -> graceful shutdown -> start
+sudo systemctl disable --now zeromq-server
+```
+
+Key points of the unit file: dedicated user, `Restart=on-failure`, `TimeoutStopSec`, `StateDirectory`, `ProtectSystem=strict`, `NoNewPrivileges`, empty `CapabilityBoundingSet`. Check the hardening score with `systemd-analyze security zeromq-server`.
+
+Updating the code: copy the new `server.py` to `/opt/zeromq-server/` and `sudo systemctl restart zeromq-server`. Connected ZeroMQ clients reconnect automatically; clients should use timeouts/retries (see the *Lazy Pirate* pattern) so that a request sent during the restart is repeated.
+
+## Step 7 – ZeroMQ vs. MQTT
+
+```bash
+sudo apt install -y mosquitto
+pip install paho-mqtt psutil
+sudo systemctl stop mosquitto          # free port 1883 for the benchmark config
+mosquitto -c 07-mqtt-comparison/mosquitto-bench.conf &
+python 07-mqtt-comparison/benchmark.py
+python 07-mqtt-comparison/benchmark.py --size 50000 --messages 5000 --roundtrips 500
+```
+
+Example output (2 vCPU Xeon @ 2.1 GHz, loopback, 64-byte payload):
+
+```
+ZeroMQ REQ/REP     median    114.5 us   p99    237.8 us
+MQTT QoS 0         median    240.5 us   p99    557.7 us
+MQTT QoS 1         median    260.5 us   p99    865.7 us
+ZeroMQ PUSH/PULL   820632 msg/s   sender CPU 0.07 s
+MQTT QoS 0          26386 msg/s   sender CPU 0.68 s   broker CPU 0.24 s
+MQTT QoS 1          14309 msg/s   sender CPU 2.32 s   broker CPU 0.71 s
+```
+
+`mosquitto-bench.conf` enables `set_tcp_nodelay`; without it QoS-1 round trips are dominated by Nagle/delayed-ACK effects (40–90 ms). Throughput numbers include the overhead of the pure-Python MQTT client – treat them as indicative only.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---------|-------------|
+| Client prints "No reply" | Rejected by ZAP (IP, password, key), wrong endpoint or server down. A rejected handshake is silent on the client side. Start the server with `ZMQ_LOG_LEVEL=DEBUG`. |
+| `Address already in use` | Another example still runs on port 5555 – stop it or change `ZMQ_ENDPOINT` on both sides. |
+| `ValueError: Only use allow or deny, not both` | pyzmq authenticator limitation – use step 4. |
+| CURVE client always rejected | Public key not in `authorized_clients/`, server not restarted, or wrong `ZMQ_SERVER_PUBLIC`. |
+| Service restarts in a loop | `journalctl -u zeromq-server -e` – usually missing certificates or wrong permissions. |
+
+Never commit `*.key_secret` files or production passwords (see `.gitignore`).

@@ -1,6 +1,6 @@
 [Unit]
-Description=ZeroMQ Example Server
-Documentation=https://zeromq.org/
+Description=ZeroMQ CURVE Example Server
+Documentation=https://github.com/Michdo93/ZeroMQ-Advanced-Examples
 After=network-online.target
 Wants=network-online.target
 
@@ -10,15 +10,32 @@ User=zmqservice
 Group=zmqservice
 WorkingDirectory=/opt/zeromq-server
 EnvironmentFile=-/etc/zeromq-server/zeromq-server.env
-ExecStart=/opt/zeromq-server/venv/bin/python /opt/zeromq-server/server.py
+# -u: unbuffered output so log lines reach journald immediately
+ExecStart=/opt/zeromq-server/venv/bin/python -u /opt/zeromq-server/server.py
+
+# Restart only on crashes / non-zero exit, not after `systemctl stop`
 Restart=on-failure
 RestartSec=5s
+# SIGTERM first, SIGKILL only if the service does not stop within 15 s
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+
+# systemd creates /var/lib/zeromq-server owned by the service user
+StateDirectory=zeromq-server
+
+# Hardening
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/zeromq-server
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
 CapabilityBoundingSet=
 
 [Install]

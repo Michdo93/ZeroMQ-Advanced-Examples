@@ -1,1 +1,4 @@
-pyzmq>=25,<28
+pyzmq>=25
+# only for 07-mqtt-comparison:
+# paho-mqtt>=2.0
+# psutil>=5.9
