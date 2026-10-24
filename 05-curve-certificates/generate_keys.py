@@ -1,13 +1,61 @@
-import argparse, os
+"""Step 5a: Create CURVE certificates (Curve25519 key pairs).
+
+Uses zmq.auth.create_certificates(), which writes the standard ZeroMQ
+certificate format (ZPL text files):
+    <name>.key          public certificate  -> may be distributed
+    <name>.key_secret   secret certificate  -> never leaves its host
+
+Resulting layout (default --output certs):
+
+    certs/
+    |-- server/server.key, server.key_secret     (stays on the server)
+    |-- clients/<name>.key, <name>.key_secret    (copy to the client host)
+    `-- authorized_clients/<name>.key            (server-side whitelist)
+
+Usage:
+    python generate_keys.py                         # server + client "alice"
+    python generate_keys.py --client bob --no-server # add another client
+"""
+
+import argparse
+import os
+import shutil
 from pathlib import Path
+
 import zmq
-p=argparse.ArgumentParser(); p.add_argument('--output',default='certs'); p.add_argument('--client',default='client'); a=p.parse_args(); root=Path(a.output); auth=root/'authorized_clients'; auth.mkdir(parents=True,exist_ok=True)
-def save(path,pub,sec=None):
- path.write_bytes(b'# public
-'+pub+b'
-');
- if sec is not None: path.with_name(path.stem+'.key_secret').write_bytes(b'# secret
-'+sec+b'
-'); os.chmod(path.with_name(path.stem+'.key_secret'),0o600)
-sp,ss=zmq.curve_keypair(); save(root/'server.key',sp,ss); cp,cs=zmq.curve_keypair(); save(root/f'{a.client}.key',cp,cs); save(auth/f'{a.client}.key',cp)
-print(f'Created key files in {root}. Keep all *_secret files private; install client public key under authorized_clients/.')
+import zmq.auth
+
+
+def create(directory: Path, name: str) -> tuple[Path, Path]:
+    directory.mkdir(parents=True, exist_ok=True)
+    public_file, secret_file = zmq.auth.create_certificates(str(directory), name)
+    os.chmod(secret_file, 0o600)  # readable by the owner only
+    return Path(public_file), Path(secret_file)
+
+
+def main() -> None:
+    if not zmq.has("curve"):
+        raise SystemExit("This libzmq build has no CURVE support (libsodium missing).")
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--output", default="certs", help="output directory")
+    parser.add_argument("--client", default="alice", help="client certificate name")
+    parser.add_argument("--no-server", action="store_true", help="do not (re)create the server key pair")
+    args = parser.parse_args()
+
+    root = Path(args.output)
+    if not args.no_server:
+        pub, _ = create(root / "server", "server")
+        print(f"Server certificate : {pub}")
+
+    pub, sec = create(root / "clients", args.client)
+    authorized = root / "authorized_clients"
+    authorized.mkdir(parents=True, exist_ok=True)
+    shutil.copy(pub, authorized / pub.name)
+    print(f"Client certificate : {pub} / {sec}")
+    print(f"Authorized on server: {authorized / pub.name}")
+    print("\nNever copy a *.key_secret file to another machine than its owner.")
+
+
+if __name__ == "__main__":
+    main()
